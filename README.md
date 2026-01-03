@@ -1,6 +1,6 @@
 # agui-go
 
-A Go package for implementing the AG-UI (Agent-User Interaction) protocol, enabling seamless integration between AI agent backends and frontend applications.
+A Go package for implementing the AG-UI (Agent-User Interaction) protocol for Google's ADK-go, enabling seamless integration between AI agent backends and frontend applications.
 
 ## Overview
 
