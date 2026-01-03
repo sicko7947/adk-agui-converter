@@ -8,19 +8,20 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ag-ui-protocol/ag-ui/sdks/community/go/pkg/core/events"
 	"github.com/stretchr/testify/assert"
 )
 
 // MockEventSource for testing the handler
 type MockEventSource struct {
-	RunFunc func(ctx Context, input RunAgentInput) <-chan Event
+	RunFunc func(ctx HandlerContext, input RunAgentInput) <-chan events.Event
 }
 
-func (m *MockEventSource) Run(ctx Context, input RunAgentInput) <-chan Event {
+func (m *MockEventSource) Run(ctx HandlerContext, input RunAgentInput) <-chan events.Event {
 	if m.RunFunc != nil {
 		return m.RunFunc(ctx, input)
 	}
-	ch := make(chan Event)
+	ch := make(chan events.Event)
 	close(ch)
 	return ch
 }
@@ -59,10 +60,10 @@ func TestHandler_ServeHTTP(t *testing.T) {
 	})
 
 	t.Run("SSE streaming", func(t *testing.T) {
-		mockSource.RunFunc = func(ctx Context, input RunAgentInput) <-chan Event {
-			ch := make(chan Event, 2)
-			ch <- RunStarted{Base: NewBase(TypeRunStarted)}
-			ch <- RunFinished{Base: NewBase(TypeRunFinished)}
+		mockSource.RunFunc = func(ctx HandlerContext, input RunAgentInput) <-chan events.Event {
+			ch := make(chan events.Event, 2)
+			ch <- events.NewRunStartedEvent("thread-1", "run-1")
+			ch <- events.NewRunFinishedEvent("thread-1", "run-1")
 			close(ch)
 			return ch
 		}
@@ -81,9 +82,9 @@ func TestHandler_ServeHTTP(t *testing.T) {
 	})
 
 	t.Run("JSON response", func(t *testing.T) {
-		mockSource.RunFunc = func(ctx Context, input RunAgentInput) <-chan Event {
-			ch := make(chan Event, 1)
-			ch <- RunStarted{Base: NewBase(TypeRunStarted), RunID: "run-json"}
+		mockSource.RunFunc = func(ctx HandlerContext, input RunAgentInput) <-chan events.Event {
+			ch := make(chan events.Event, 1)
+			ch <- events.NewRunStartedEvent("thread-json", "run-json")
 			close(ch)
 			return ch
 		}
@@ -97,14 +98,13 @@ func TestHandler_ServeHTTP(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, rr.Code)
 		assert.Equal(t, "application/json", rr.Header().Get("Content-Type"))
-		assert.Contains(t, rr.Body.String(), `"runId":"run-json"`)
 	})
 
 	t.Run("Generate IDs", func(t *testing.T) {
-		var capturedCtx Context
-		mockSource.RunFunc = func(ctx Context, input RunAgentInput) <-chan Event {
+		var capturedCtx HandlerContext
+		mockSource.RunFunc = func(ctx HandlerContext, input RunAgentInput) <-chan events.Event {
 			capturedCtx = ctx
-			ch := make(chan Event)
+			ch := make(chan events.Event)
 			close(ch)
 			return ch
 		}

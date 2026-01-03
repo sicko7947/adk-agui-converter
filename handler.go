@@ -1,14 +1,16 @@
-// Package handler provides HTTP handlers for the AG-UI protocol.
+// Package aguigo provides HTTP handlers for the AG-UI protocol.
 package aguigo
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 
-	"github.com/google/uuid"
+	"github.com/ag-ui-protocol/ag-ui/sdks/community/go/pkg/core/events"
+	"github.com/ag-ui-protocol/ag-ui/sdks/community/go/pkg/encoding/sse"
 )
 
 // RunAgentInput represents the AG-UI protocol input format
@@ -28,40 +30,42 @@ type Tool struct {
 	Parameters  any    `json:"parameters,omitempty"`
 }
 
-// EventSource is the interface that agent implementations must satisfy
-// to work with the AG-UI handler.
-type EventSource interface {
-	// Run executes the agent and returns a channel of events.
-	// The channel should be closed when the agent finishes.
-	// If an error occurs, it should be sent as a RunError
-	Run(ctx Context, input RunAgentInput) <-chan Event
+// Message represents a chat message in the history
+type Message struct {
+	ID        string        `json:"id"`
+	Role      string        `json:"role"`
+	Content   []ContentPart `json:"content"`
+	Name      string        `json:"name,omitempty"`
+	CreatedAt int64         `json:"createdAt,omitempty"`
 }
 
-// Context provides context for the agent run
-type Context struct {
-	// ThreadID is the conversation thread ID
+// ContentPart represents a part of message content
+type ContentPart struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	MimeType string `json:"mimeType,omitempty"`
+	Data     string `json:"data,omitempty"`
+	URL      string `json:"url,omitempty"`
+}
+
+// EventSource is the interface that agent implementations must satisfy
+type EventSource interface {
+	Run(ctx HandlerContext, input RunAgentInput) <-chan events.Event
+}
+
+// HandlerContext provides context for the agent run
+type HandlerContext struct {
 	ThreadID string
-
-	// RunID is the unique ID for this run
-	RunID string
-
-	// UserID is the user identifier (if available)
-	UserID string
-
-	// Request is the original HTTP request
-	Request *http.Request
+	RunID    string
+	UserID   string
+	Request  *http.Request
 }
 
 // Config configures the handler
 type Config struct {
-	// EventSource is the agent event source
 	EventSource EventSource
-
-	// AppName is the application name
-	AppName string
-
-	// Logger is an optional logger
-	Logger Logger
+	AppName     string
+	Logger      Logger
 }
 
 // Logger interface for logging
@@ -69,7 +73,6 @@ type Logger interface {
 	Printf(format string, v ...any)
 }
 
-// defaultLogger is a no-op logger
 type defaultLogger struct{}
 
 func (defaultLogger) Printf(format string, v ...any) {}
@@ -100,68 +103,47 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.logger.Printf("[AG-UI] Received %s request from %s", r.Method, r.RemoteAddr)
 
 	if r.Method == http.MethodOptions {
-		h.logger.Printf("[AG-UI] Handling CORS preflight request")
 		h.handleCORS(w)
 		return
 	}
 
 	if r.Method != http.MethodPost {
-		h.logger.Printf("[AG-UI] Method not allowed: %s", r.Method)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Parse input
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		h.logger.Printf("[AG-UI] Failed to read request body: %v", err)
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
 	defer r.Body.Close()
 
-	h.logger.Printf("[AG-UI] Request body: %s", string(body))
-
 	var input RunAgentInput
 	if err := json.Unmarshal(body, &input); err != nil {
-		h.logger.Printf("[AG-UI] Invalid JSON: %v", err)
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	// Ensure IDs exist
 	if input.ThreadID == "" {
-		input.ThreadID = uuid.New().String()
-		h.logger.Printf("[AG-UI] Generated new threadId: %s", input.ThreadID)
+		input.ThreadID = events.GenerateThreadID()
 	}
 	if input.RunID == "" {
-		input.RunID = uuid.New().String()
-		h.logger.Printf("[AG-UI] Generated new runId: %s", input.RunID)
+		input.RunID = events.GenerateRunID()
 	}
 
-	h.logger.Printf("[AG-UI] Processing request - threadId: %s, runId: %s, messages: %d",
-		input.ThreadID, input.RunID, len(input.Messages))
-
-	// Determine encoding based on Accept header
-	accept := r.Header.Get("Accept")
-	contentType := ParseAcceptHeader(accept)
-	h.logger.Printf("[AG-UI] Accept header: %s, using content-type: %s", accept, contentType)
-
-	// Create context
-	ctx := Context{
+	ctx := HandlerContext{
 		ThreadID: input.ThreadID,
 		RunID:    input.RunID,
 		UserID:   r.Header.Get("X-User-ID"),
 		Request:  r,
 	}
 
-	// Handle streaming vs non-streaming
-	if contentType == "text/event-stream" {
-		h.logger.Printf("[AG-UI] Starting SSE streaming response")
-		h.handleSSE(w, ctx, input)
+	accept := r.Header.Get("Accept")
+	if accept == "" || accept == "text/event-stream" || accept == "*/*" {
+		h.handleSSE(w, r.Context(), ctx, input)
 	} else {
-		h.logger.Printf("[AG-UI] Starting JSON response")
-		h.handleJSON(w, ctx, input)
+		h.handleJSON(w, r.Context(), ctx, input)
 	}
 }
 
@@ -172,51 +154,46 @@ func (h *Handler) handleCORS(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleSSE handles Server-Sent Events streaming
-func (h *Handler) handleSSE(w http.ResponseWriter, ctx Context, input RunAgentInput) {
-	SetSSEHeaders(w)
-	enc := NewSSE(w)
+func (h *Handler) handleSSE(w http.ResponseWriter, ctx context.Context, hctx HandlerContext, input RunAgentInput) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("X-Accel-Buffering", "no")
 
-	// Get events from the event source
-	events := h.eventSource.Run(ctx, input)
+	writer := sse.NewSSEWriter()
+	eventsChan := h.eventSource.Run(hctx, input)
 
-	// Stream events
-	for evt := range events {
-		if err := enc.Encode(evt); err != nil {
-			h.logger.Printf("[AG-UI] Failed to send event: %v (client disconnected?)", err)
+	for evt := range eventsChan {
+		if err := writer.WriteEvent(ctx, w, evt); err != nil {
+			h.logger.Printf("[AG-UI] Failed to send event: %v", err)
 			return
 		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
 	}
-
-	h.logger.Printf("E response completed")
 }
 
-// handleJSON handles non-streaming JSON responses
-func (h *Handler) handleJSON(w http.ResponseWriter, ctx Context, input RunAgentInput) {
-	var allEvents []Event
+func (h *Handler) handleJSON(w http.ResponseWriter, ctx context.Context, hctx HandlerContext, input RunAgentInput) {
+	var allEvents []events.Event
 
-	// Get events from the event source
-	events := h.eventSource.Run(ctx, input)
-
-	// Collect all events
-	for evt := range events {
+	eventsChan := h.eventSource.Run(hctx, input)
+	for evt := range eventsChan {
 		allEvents = append(allEvents, evt)
 	}
 
-	h.logger.Printf("[AG-UI] Total events to send: %d", len(allEvents))
-
-	// Send all events as JSON array
-	data, err := MarshalEvents(allEvents)
-	if err != nil {
-		h.logger.Printf("[AG-UI] Failed to mars: %v", err)
-		http.Error(w, "Failed to marshal events", http.StatusInternalServerError)
-		return
+	var jsonEvents []json.RawMessage
+	for _, evt := range allEvents {
+		data, err := evt.ToJSON()
+		if err != nil {
+			continue
+		}
+		jsonEvents = append(jsonEvents, data)
 	}
 
-	h.logger.Printf("[AG-UI] Sending JSON response")
-
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(data)
+	json.NewEncoder(w).Encode(jsonEvents)
 }
 
 // HealthHandler returns a simple health check endpoint
@@ -249,7 +226,6 @@ func CORSMiddleware(next http.Handler) http.Handler {
 // StdLogger wraps the standard log package
 type StdLogger struct{}
 
-// Printf implements Logger
 func (StdLogger) Printf(format string, v ...any) {
 	log.Printf(format, v...)
 }
