@@ -48,6 +48,51 @@ type ContentPart struct {
 	URL      string `json:"url,omitempty"`
 }
 
+// UnmarshalJSON implements custom JSON unmarshaling for Message
+// to support both string content (simple) and array content (rich)
+func (m *Message) UnmarshalJSON(data []byte) error {
+	// Use an alias to avoid infinite recursion
+	type MessageAlias Message
+	type messageRaw struct {
+		MessageAlias
+		Content json.RawMessage `json:"content"`
+	}
+
+	var raw messageRaw
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	// Copy the non-content fields
+	*m = Message(raw.MessageAlias)
+
+	// Handle empty content
+	if len(raw.Content) == 0 || string(raw.Content) == "null" {
+		m.Content = nil
+		return nil
+	}
+
+	// Try to unmarshal as string first
+	var contentStr string
+	if err := json.Unmarshal(raw.Content, &contentStr); err == nil {
+		// Content is a string, convert to ContentPart array
+		m.Content = []ContentPart{{
+			Type: "text",
+			Text: contentStr,
+		}}
+		return nil
+	}
+
+	// Try to unmarshal as array of ContentPart
+	var contentParts []ContentPart
+	if err := json.Unmarshal(raw.Content, &contentParts); err != nil {
+		return fmt.Errorf("content must be either a string or an array of ContentPart: %w", err)
+	}
+
+	m.Content = contentParts
+	return nil
+}
+
 // EventSource is the interface that agent implementations must satisfy
 type EventSource interface {
 	Run(ctx HandlerContext, input RunAgentInput) <-chan events.Event

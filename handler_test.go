@@ -150,3 +150,103 @@ func TestCORSMiddleware(t *testing.T) {
 		assert.Equal(t, "*", rr.Header().Get("Access-Control-Allow-Origin"))
 	})
 }
+
+func TestMessage_UnmarshalJSON(t *testing.T) {
+	t.Run("String content", func(t *testing.T) {
+		jsonData := `{
+			"id": "msg-1",
+			"role": "user",
+			"content": "Hello, world!"
+		}`
+
+		var msg Message
+		err := json.Unmarshal([]byte(jsonData), &msg)
+		assert.NoError(t, err)
+		assert.Equal(t, "msg-1", msg.ID)
+		assert.Equal(t, "user", msg.Role)
+		assert.Len(t, msg.Content, 1)
+		assert.Equal(t, "text", msg.Content[0].Type)
+		assert.Equal(t, "Hello, world!", msg.Content[0].Text)
+	})
+
+	t.Run("Array content", func(t *testing.T) {
+		jsonData := `{
+			"id": "msg-2",
+			"role": "assistant",
+			"content": [
+				{"type": "text", "text": "Here is an image:"},
+				{"type": "image", "url": "https://example.com/image.png"}
+			]
+		}`
+
+		var msg Message
+		err := json.Unmarshal([]byte(jsonData), &msg)
+		assert.NoError(t, err)
+		assert.Equal(t, "msg-2", msg.ID)
+		assert.Equal(t, "assistant", msg.Role)
+		assert.Len(t, msg.Content, 2)
+		assert.Equal(t, "text", msg.Content[0].Type)
+		assert.Equal(t, "Here is an image:", msg.Content[0].Text)
+		assert.Equal(t, "image", msg.Content[1].Type)
+		assert.Equal(t, "https://example.com/image.png", msg.Content[1].URL)
+	})
+
+	t.Run("Null content", func(t *testing.T) {
+		jsonData := `{
+			"id": "msg-3",
+			"role": "system",
+			"content": null
+		}`
+
+		var msg Message
+		err := json.Unmarshal([]byte(jsonData), &msg)
+		assert.NoError(t, err)
+		assert.Nil(t, msg.Content)
+	})
+
+	t.Run("Empty string content", func(t *testing.T) {
+		jsonData := `{
+			"id": "msg-4",
+			"role": "user",
+			"content": ""
+		}`
+
+		var msg Message
+		err := json.Unmarshal([]byte(jsonData), &msg)
+		assert.NoError(t, err)
+		assert.Len(t, msg.Content, 1)
+		assert.Equal(t, "text", msg.Content[0].Type)
+		assert.Equal(t, "", msg.Content[0].Text)
+	})
+
+	t.Run("Invalid content type", func(t *testing.T) {
+		jsonData := `{
+			"id": "msg-5",
+			"role": "user",
+			"content": 12345
+		}`
+
+		var msg Message
+		err := json.Unmarshal([]byte(jsonData), &msg)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "content must be either a string or an array")
+	})
+}
+
+func TestRunAgentInput_UnmarshalJSON_WithStringContent(t *testing.T) {
+	jsonData := `{
+		"threadId": "thread-1",
+		"messages": [
+			{"id": "msg-1", "role": "user", "content": "Hello from string content"}
+		]
+	}`
+
+	var input RunAgentInput
+	err := json.Unmarshal([]byte(jsonData), &input)
+	assert.NoError(t, err)
+	assert.Equal(t, "thread-1", input.ThreadID)
+	assert.Len(t, input.Messages, 1)
+	assert.Len(t, input.Messages[0].Content, 1)
+	assert.Equal(t, "text", input.Messages[0].Content[0].Type)
+	assert.Equal(t, "Hello from string content", input.Messages[0].Content[0].Text)
+}
